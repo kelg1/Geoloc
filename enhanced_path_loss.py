@@ -53,7 +53,6 @@ def matrix_fill_sin(val, i, j):
 #################################
 
 
-
 class Model:
     """ 
     Generic class for models. 
@@ -196,8 +195,8 @@ class EnhancedPathLoss(Model):
         self.Kr = Kr
         self.Kt = Kt
         self.alpha_ = np.zeros((2*self.Kt+1))
-        self.beta_ = np.zeros(self.Kr+1)
-        self.h_rho = np.linspace(0, 30, self.Kr+1)
+        self.beta_ = -100*np.ones(self.Kr)
+        self.h_rho = np.linspace(0, 30, self.Kr)
         self.mu_l2 = mu_l2
         self.mu_l1 = mu_l1
         
@@ -265,7 +264,7 @@ class EnhancedPathLoss(Model):
             raise NotImplementedError
         else:
             t0 = time.clock()
-            reg = linear_model.ElasticNet(alpha=self.mu_alpha, l1_ratio=.9, fit_intercept=False)
+            reg = linear_model.ElasticNet(alpha=self.mu_alpha, l1_ratio=1., fit_intercept=False)
             #sys.stdout.write('\r'+ 'Function Phi is fitted with: ' +reg.__str__()+ '\n')
             self.build_matrix_Xt(X)
             reg.fit(self.matrix_Xt, y)
@@ -280,11 +279,10 @@ class EnhancedPathLoss(Model):
         
     def _infer_Psi_PTV(self, X, y=None):
         self.build_matrix_Xr(X)
-        max_ev = (np.linalg.eigvals(np.dot(self.matrix_Xr.T, self.matrix_Xr)))[0]
-        proxtv = ADMM(partial(self.F, y), partial(self.grad_F, y), weights=np.concatenate(([0], [self.mu_l1/(self.mu_l2 + max_ev)]*(self.Kr-1))),
-                        gamma=1/(self.mu_l2 + max_ev))
-        beta0 = np.zeros((self.Kr+1))
-        beta0[0] = -100
+        max_ev = np.max(np.linalg.eigvals(np.dot(self.matrix_Xr.T, self.matrix_Xr)))
+        proxtv = ADMM(partial(self.F, y), partial(self.grad_F, y), weights=float(self.mu_l1), gamma=float(2./(self.mu_l2 + max_ev)))
+    
+        beta0 = -100*np.ones((self.Kr))
         beta_PTV = proxtv.run_algo(x0=beta0, epsi=1e-5)
         self.beta_ = beta_PTV
     
@@ -315,7 +313,10 @@ class EnhancedPathLoss(Model):
     
     def Psi(self, rho):
         def wrapper(r):
-            return self.beta_[np.min(np.where(r < self.h_rho)[0])] + self.beta_[0] if self.h_rho[-1] >= r else self.beta_[0]
+            if self.h_rho[-1] > r:
+                return self.beta_[np.min(np.where(r < self.h_rho)[0])]
+            else:
+                return self.beta_.min()
         return np.array([wrapper(r) for r in rho])
 
     
@@ -339,14 +340,13 @@ class EnhancedPathLoss(Model):
         
     
     def functions_dico_r(self):
-        return np.array([IND(self.h_rho[k-1],self.h_rho[k], self.beta_[k]) if k > 0 else
-                                     IND(0, 30, self.beta_[0]) for k in np.arange(0, self.Kr+1)])
+        return np.array([IND(self.h_rho[k-1],self.h_rho[k], self.beta_[k]) for k in np.arange(1, self.Kr)])
     
     def build_matrix_Xr(self, X):
         #print(not hasattr(self, 'matrix_Xr'))
         if not hasattr(self, 'matrix_Xr'):
-            matrix_Xr = np.zeros((X.shape[0], self.Kr+1))
-            matrix_Xr[:,0] = 1
+            matrix_Xr = np.zeros((X.shape[0], self.Kr))
+            
 
             ### FILL matrix Xr ### 
 
@@ -408,10 +408,10 @@ class ADMM:
     def backward_step(self, current_state):
         #x = ptv.tv1_1d(current_state, self.gamma, method='hybridtautstring')
         #w = np.concatenate(([0], [self.gamma]*(len(current_state)-2)))
-        x = ptv.tv1w_1d(current_state, w=self.weights, method='tautstring',)
+        x = ptv.tv1_1d(current_state, w=float(self.weights*self.gamma), method='hybridtautstring',)
         return x
     
-    def run_algo(self, x0, epsi=1e-2, n_iterations=100):
+    def run_algo(self, x0, epsi=1e-2, n_iterations=10):
         x_ = x0.copy()
         for iteration in range(n_iterations):
             y = self.forward_step(x_)
@@ -421,6 +421,6 @@ class ADMM:
                 return x__
             else:
                 x_ = x__.copy()
+            #print(x__)
         #did not converge
-        return x__  
-        
+        return x__
