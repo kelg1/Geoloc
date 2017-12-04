@@ -149,7 +149,7 @@ class Model:
 
     def max_error(self, X, y):
         #scorer = metrics.make_scorer(np.linalg.norm, greater_is_better=False)
-        
+
         y_pred = self.predict(X)
         y_true = y.copy()
         error_on_data = np.sqrt(((y_true - y_pred) ** 2).mean())
@@ -343,6 +343,8 @@ class EnhancedPathLoss(Model):
     
     def join_fit(self, X, y):
         #(y - self.predict(X))
+        self.build_matrix_Xr(X)
+        self.build_matrix_Xt(X)
         def J(theta):
             alpha = theta[:2*self.Kt+1]
             beta = theta[2*self.Kt+1:]
@@ -363,7 +365,7 @@ class EnhancedPathLoss(Model):
                                                   self.beta_ )),
                         jac=gradJ, method='Nelder-Mead', callback=J, options={'fatol': 10})
         self.alpha_, self.beta_ = res.x[:2*self.Kt+1], res.x[2*self.Kt+1:]
-
+        return self
         
     def Psi(self, rho):
         def wrapper(r):
