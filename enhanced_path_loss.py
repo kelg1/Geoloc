@@ -42,10 +42,10 @@ def deprecated(func):
 
 
 def matrix_fill_cos(val, i, j):
-    return np.cos(np.around(val.angle.iloc[i], 2)*j)
+    return np.cos(np.around(val.angle.iloc[i], 5)*j)
 
 def matrix_fill_sin(val, i, j):
-    return np.sin(np.around(val.angle.iloc[i], 2)*j)
+    return np.sin(np.around(val.angle.iloc[i], 5)*j)
 
 
 #################################
@@ -147,6 +147,15 @@ class Model:
         #regularization = self.mu_l1 * np.abs(self.beta_[1:-1] - self.beta_[2:]).mean()
         return - error_on_data 
 
+    def max_error(self, X, y):
+        #scorer = metrics.make_scorer(np.linalg.norm, greater_is_better=False)
+        
+        y_pred = self.predict(X)
+        y_true = y.copy()
+        error_on_data = np.sqrt(((y_true - y_pred) ** 2).mean())
+        #regularization = self.mu_l1 * np.abs(self.beta_[1:-1] - self.beta_[2:]).mean()
+        return - error_on_data 
+
     def _loglikelihood_wrapper(self, X, y):
         """
         Parameters:
@@ -194,9 +203,9 @@ class EnhancedPathLoss(Model):
         self.mu_alpha = mu_alpha
         self.Kr = Kr
         self.Kt = Kt
-        self.alpha_ = np.zeros((2*self.Kt+1))
-        self.beta_ = -100*np.ones(self.Kr)
-        self.h_rho = np.linspace(0, 30, self.Kr)
+        self.alpha_ = np.ones((2*self.Kt+1))
+        self.beta_ = -200*np.ones(self.Kr)
+        self.h_rho = np.linspace(0, 30, self.Kr+1)
         self.mu_l2 = mu_l2
         self.mu_l1 = mu_l1
         
@@ -280,10 +289,10 @@ class EnhancedPathLoss(Model):
     def _infer_Psi_PTV(self, X, y=None):
         self.build_matrix_Xr(X)
         max_ev = np.max(np.linalg.eigvals(np.dot(self.matrix_Xr.T, self.matrix_Xr)))
-        proxtv = ADMM(partial(self.F, y), partial(self.grad_F, y), weights=float(self.mu_l1), gamma=float(2./(self.mu_l2 + max_ev)))
+        proxtv = ADMM(partial(self.F, y), partial(self.grad_F, y), weights=float(self.mu_l1), gamma=float(.9/(self.mu_l2 + max_ev)))
     
-        beta0 = -100*np.ones((self.Kr))
-        beta_PTV = proxtv.run_algo(x0=beta0, epsi=1e-5)
+        beta0 = -200*np.ones((self.Kr))
+        beta_PTV = proxtv.run_algo(x0=beta0, epsi=1e-1)
         self.beta_ = beta_PTV
     
     def Phi(self, theta):
@@ -310,13 +319,59 @@ class EnhancedPathLoss(Model):
             beta_ = np.dot(self.matrix_Xr.T, y) - np.dot(D.T, u)
             self.beta_ = np.dot(iXtX, beta_)
             
+    def objective_function(self, X, y):
+        return .5*((y - self.predict(X))**2).sum()
     
+    def sqrt_error(self, X, y):
+        return (y - self.predict(X))
+    
+    def grad_J_alpha_(self, X, y):
+        self.build_matrix_Xt(X)
+        g = -( np.dot(self.alpha_, self.matrix_Xt.T).shape * self.sqrt_error(X, y) )[:,np.newaxis] \
+            * self.matrix_Xr
+        return g.sum(0) 
+        
+    def grad_J_beta_(self, X, y):
+        self.build_matrix_Xr(X)
+        g = -( np.dot(self.beta_, self.matrix_Xr.T).shape * self.sqrt_error(X, y) )[:,np.newaxis] \
+            * self.matrix_Xt
+        return g.sum(0)
+    
+    
+    def grad_J_theta(self, X, y):
+        return np.concatenate((self.grad_J_alpha_(X, y), self.grad_J_beta_(X, y)))
+    
+    def join_fit(self, X, y):
+        #(y - self.predict(X))
+        def J(theta):
+            alpha = theta[:2*self.Kt+1]
+            beta = theta[2*self.Kt+1:]
+            model_ = copy.copy(self)
+            model_.alpha_ = alpha
+            model_.beta_ = beta
+            return model_.objective_function(X, y)
+
+        def gradJ(theta):
+            alpha = theta[:2*self.Kt+1]
+            beta = theta[2*self.Kt+1:]
+            model_ = copy.copy(self)
+            model_.alpha_ = alpha
+            model_.beta_ = beta
+            return model_.grad_J_theta(X, y)
+        
+        res = scipy.optimize.minimize(fun=J, x0=np.concatenate((self.alpha_, 
+                                                  self.beta_ )),
+                        jac=gradJ, method='Nelder-Mead', callback=J, options={'fatol': 10})
+        self.alpha_, self.beta_ = res.x[:2*self.Kt+1], res.x[2*self.Kt+1:]
+
+        
     def Psi(self, rho):
         def wrapper(r):
             if self.h_rho[-1] > r:
-                return self.beta_[np.min(np.where(r < self.h_rho)[0])]
+                j = np.min(np.where(r < self.h_rho)[0])
+                return self.beta_[j - 1]
             else:
-                return self.beta_.min()
+                return self.beta_[-1]
         return np.array([wrapper(r) for r in rho])
 
     
@@ -352,7 +407,7 @@ class EnhancedPathLoss(Model):
 
             for i in np.arange(0, matrix_Xr.shape[0]):
                 j = np.min(np.where(X.distance.iloc[i] < self.h_rho)[0])
-                matrix_Xr[i,j] = 1
+                matrix_Xr[i,j-1] = 1
             #print(matrix_Xr.sum(0))
             self.matrix_Xr = matrix_Xr
             #sys.stdout.write('\r \t'+'Matrix Xrho is built. \n')    
@@ -411,7 +466,7 @@ class ADMM:
         x = ptv.tv1_1d(current_state, w=float(self.weights*self.gamma), method='hybridtautstring',)
         return x
     
-    def run_algo(self, x0, epsi=1e-2, n_iterations=10):
+    def run_algo(self, x0, epsi=1e-2, n_iterations=100):
         x_ = x0.copy()
         for iteration in range(n_iterations):
             y = self.forward_step(x_)
@@ -424,3 +479,34 @@ class ADMM:
             #print(x__)
         #did not converge
         return x__
+
+
+class util:
+        """
+    In order to convert DataFrame to an other in which each row (msg)
+    give the rssi value to each bs
+
+    """
+
+    def __init__(self):
+        pass
+
+    def describe(self, df):
+        st = """Number of BS:\t {nbs}\t \n
+========================== \n
+Number of msg:\t {nmsg}\t \n 
+========================== \n""".format(nbs=df.bsid.nunique(),
+                                       nmsg=df.messageid.nunique())
+        return st
+
+    def groupbymsg(self, df):
+        self.dd_tmp = pd.DataFrame()
+        df_msg = df.groupby('messageid')
+        for g, v in df_msg:
+            tmp = pd.DataFrame(v.groupby('bsid').rssi.max()[:,np.newaxis].T, index=[g], columns=v.bsid.unique())
+            tmp['latitude'] = v.latitude.unique()
+            tmp['longitude'] = v.longitude.unique()
+            self.dd_tmp = self.dd_tmp.append(tmp)
+            sys.stdout.write('\r'+str(np.round(100*len(self.dd_tmp)/len(df_msg), 0)) + ' % ' + '(' + \
+                            str(len(self.dd_tmp)) +'/'+ str(len(df_msg)) + ')')
+        return self.dd_tmp
