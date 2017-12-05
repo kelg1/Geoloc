@@ -16,6 +16,7 @@ import prox_tv as ptv
 import time
 import scipy
 import scipy.stats
+import copy
 
 
 
@@ -174,6 +175,8 @@ class Model:
         return loglikelihood
     
 
+import copy 
+
 class EnhancedPathLoss(Model):
     """
     Enhanced Path Loss model as refered
@@ -203,9 +206,10 @@ class EnhancedPathLoss(Model):
         self.mu_alpha = mu_alpha
         self.Kr = Kr
         self.Kt = Kt
-        self.alpha_ = np.ones((2*self.Kt+1))
+        self.alpha_ = np.ones(self.Kt)
         self.beta_ = -200*np.ones(self.Kr)
         self.h_rho = np.linspace(0, 30, self.Kr+1)
+        self.h_theta = np.linspace(0, 2*np.pi, self.Kt+1)
         self.mu_l2 = mu_l2
         self.mu_l1 = mu_l1
         
@@ -294,9 +298,19 @@ class EnhancedPathLoss(Model):
         beta0 = -200*np.ones((self.Kr))
         beta_PTV = proxtv.run_algo(x0=beta0, epsi=1e-1)
         self.beta_ = beta_PTV
-    
+        
+    @deprecated
     def Phi(self, theta):
         return np.sum([f.value(theta) for f in self.functions_dico_t()], 0)
+    
+    
+    def Phi(self, theta):
+        def wrapper(t):
+            tt = t % (2*np.pi)
+            j = np.min(np.where(tt < self.h_theta)[0])
+            return self.alpha_[j - 1]
+        return np.array([wrapper(t) for t in theta])
+        
     
     @deprecated
     def _infer_Psi(self, X, y=None):
@@ -326,7 +340,7 @@ class EnhancedPathLoss(Model):
         return (y - self.predict(X))
     
     def grad_J_alpha_(self, X, y):
-        self.build_matrix_Xt(X)
+        self.build_matrix_Xt_new_base(X)
         g = -( np.dot(self.alpha_, self.matrix_Xt.T).shape * self.sqrt_error(X, y) )[:,np.newaxis] \
             * self.matrix_Xr
         return g.sum(0) 
@@ -341,21 +355,22 @@ class EnhancedPathLoss(Model):
     def grad_J_theta(self, X, y):
         return np.concatenate((self.grad_J_alpha_(X, y), self.grad_J_beta_(X, y)))
     
-    def join_fit(self, X, y):
-        #(y - self.predict(X))
+    def join_fit(self, X, y, maxit=400):
+        ## Build matrices 
+        
+        self.build_matrix_Xt_new_base(X)
         self.build_matrix_Xr(X)
-        self.build_matrix_Xt(X)
         def J(theta):
-            alpha = theta[:2*self.Kt+1]
-            beta = theta[2*self.Kt+1:]
+            alpha = theta[:self.Kt+1]
+            beta = theta[self.Kt+1:]
             model_ = copy.copy(self)
             model_.alpha_ = alpha
             model_.beta_ = beta
             return model_.objective_function(X, y)
 
         def gradJ(theta):
-            alpha = theta[:2*self.Kt+1]
-            beta = theta[2*self.Kt+1:]
+            alpha = theta[:self.Kt+1]
+            beta = theta[self.Kt+1:]
             model_ = copy.copy(self)
             model_.alpha_ = alpha
             model_.beta_ = beta
@@ -363,8 +378,9 @@ class EnhancedPathLoss(Model):
         
         res = scipy.optimize.minimize(fun=J, x0=np.concatenate((self.alpha_, 
                                                   self.beta_ )),
-                        jac=gradJ, method='Nelder-Mead', callback=J, options={'fatol': 10})
-        self.alpha_, self.beta_ = res.x[:2*self.Kt+1], res.x[2*self.Kt+1:]
+                        jac=gradJ, method='Nelder-Mead', options={'fatol': 10, 'maxiter': maxit})
+        self.alpha_, self.beta_ = res.x[:self.Kt], res.x[self.Kt:]
+        self.scale = np.sqrt(np.mean((y - self.predict(X))**2))
         return self
         
     def Psi(self, rho):
@@ -376,7 +392,7 @@ class EnhancedPathLoss(Model):
                 return self.beta_[-1]
         return np.array([wrapper(r) for r in rho])
 
-    
+    @deprecated
     def build_matrix_Xt(self, X):
         if not hasattr(self, 'matrix_Xt'):
             matrix_X_cos = np.zeros((X.shape[0], self.Kt+1))
@@ -395,6 +411,21 @@ class EnhancedPathLoss(Model):
                 #sys.stdout.write('\r \t'+'Matrix Xtheta is built. \n')
             self.matrix_Xt = matrix_Xt
         
+        
+    def build_matrix_Xt_new_base(self, X):
+        #print(not hasattr(self, 'matrix_Xt'))
+        if not hasattr(self, 'matrix_Xt'):
+            matrix_Xt = np.zeros((X.shape[0], self.Kt))
+            
+
+            ### FILL matrix Xt ### 
+
+            for i in np.arange(0, matrix_Xt.shape[0]):
+                j = np.min(np.where(X.angle.iloc[i] < self.h_theta)[0])
+                matrix_Xt[i,j-1] = 1
+            #print(matrix_Xt.sum(0))
+            self.matrix_Xt = matrix_Xt
+            #sys.stdout.write('\r \t'+'Matrix Xrho is built. \n')    
     
     def functions_dico_r(self):
         return np.array([IND(self.h_rho[k-1],self.h_rho[k], self.beta_[k]) for k in np.arange(1, self.Kr)])
@@ -481,34 +512,3 @@ class ADMM:
             #print(x__)
         #did not converge
         return x__
-
-
-class util:
-        """
-    In order to convert DataFrame to an other in which each row (msg)
-    give the rssi value to each bs
-
-    """
-
-    def __init__(self):
-        pass
-
-    def describe(self, df):
-        st = """Number of BS:\t {nbs}\t \n
-========================== \n
-Number of msg:\t {nmsg}\t \n 
-========================== \n""".format(nbs=df.bsid.nunique(),
-                                       nmsg=df.messageid.nunique())
-        return st
-
-    def groupbymsg(self, df):
-        self.dd_tmp = pd.DataFrame()
-        df_msg = df.groupby('messageid')
-        for g, v in df_msg:
-            tmp = pd.DataFrame(v.groupby('bsid').rssi.max()[:,np.newaxis].T, index=[g], columns=v.bsid.unique())
-            tmp['latitude'] = v.latitude.unique()
-            tmp['longitude'] = v.longitude.unique()
-            self.dd_tmp = self.dd_tmp.append(tmp)
-            sys.stdout.write('\r'+str(np.round(100*len(self.dd_tmp)/len(df_msg), 0)) + ' % ' + '(' + \
-                            str(len(self.dd_tmp)) +'/'+ str(len(df_msg)) + ')')
-        return self.dd_tmp
